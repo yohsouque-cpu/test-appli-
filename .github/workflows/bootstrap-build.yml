@@ -1,0 +1,121 @@
+name: SQE Methodes - Build source ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'SQE_Methodes_*_Source*.zip'
+      - '.github/workflows/bootstrap-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: '28.2.13676358'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select source ZIP
+        shell: bash
+        run: |
+          ZIP=$(ls -1t SQE_Methodes_*_Source*.zip | head -n 1)
+          test -n "$ZIP"
+          echo "SOURCE_ZIP=$ZIP" >> "$GITHUB_ENV"
+      - name: Extract source
+        shell: bash
+        run: |
+          rm -rf work && mkdir work
+          unzip -q "$SOURCE_ZIP" -d work
+          test -f work/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Preserve development signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: sqe-methodes-android-debug-keystore-v1
+      - name: Install dependencies and check source
+        working-directory: work
+        run: |
+          npm install --no-audit --no-fund
+          npm run test:static
+          npm run tauri -- icon app-icon.svg
+      - name: Initialize Android
+        working-directory: work
+        run: npm run tauri -- android init --ci
+      - name: Build Android APK
+        working-directory: work
+        run: npm run tauri -- android build --debug --apk --target aarch64
+      - name: Collect Android artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts/android
+          APK=$(find work/src-tauri/gen/android -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          cp "$APK" artifacts/android/SQE_Methodes_B0_Android.apk
+          sha256sum artifacts/android/SQE_Methodes_B0_Android.apk > artifacts/android/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SQE_Methodes_B0_Android
+          path: artifacts/android/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows NSIS
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select and extract source ZIP
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem 'SQE_Methodes_*_Source*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $zip) { throw 'Source ZIP introuvable' }
+          if (Test-Path work) { Remove-Item work -Recurse -Force }
+          Expand-Archive -Path $zip.FullName -DestinationPath work
+          if (-not (Test-Path 'work/package.json')) { throw 'package.json introuvable dans le ZIP' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies and check source
+        working-directory: work
+        run: |
+          npm install --no-audit --no-fund
+          npm run test:static
+          npm run tauri -- icon app-icon.svg
+      - name: Build Windows installer
+        working-directory: work
+        run: npm run tauri -- build --bundles nsis
+      - name: Collect Windows artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/windows | Out-Null
+          $installer = Get-ChildItem -Path work/src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Installateur NSIS introuvable' }
+          Copy-Item $installer.FullName -Destination artifacts/windows/SQE_Methodes_B0_Setup.exe
+          Get-FileHash artifacts/windows/SQE_Methodes_B0_Setup.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  SQE_Methodes_B0_Setup.exe" } | Set-Content artifacts/windows/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SQE_Methodes_B0_Windows
+          path: artifacts/windows/*
+          if-no-files-found: error
